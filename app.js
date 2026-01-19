@@ -1,13 +1,15 @@
 require("dotenv").config({ quiet: true });
 
 const express = require("express");
-const scratchRoutes = require("./routes/scratchRoutes");
+
+const authRoutes = require("./routes/authRoutes");
+const productRoutes = require("./routes/productRoutes");
 
 const app = express();
 
 const allowedOrigins = new Set([
-  "https://jockey-scratch-card-admin.vercel.app",
-  "https://jockey-scratch-card-website.vercel.app",
+  "https://fake-product-identification-backend.vercel.app",
+  "https://fake-product-identification-website.vercel.app",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
   "http://localhost:5173",
@@ -26,23 +28,21 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   }
 
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 app.get("/", (req, res) => {
   res.status(200).send("Backend running");
 });
 
-app.use("/api", scratchRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/products", productRoutes);
 
 module.exports = app;
