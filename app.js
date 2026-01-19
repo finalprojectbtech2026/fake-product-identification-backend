@@ -1,21 +1,17 @@
-require("dotenv").config({ quiet: true });
+require("dotenv").config();
 
 const express = require("express");
-
 const authRoutes = require("./routes/authRoutes");
 const productRoutes = require("./routes/productRoutes");
 
 const app = express();
 
 const allowedOrigins = new Set([
-  "https://fake-product-identification-backend.vercel.app",
   "https://fake-product-identification-website.vercel.app",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
   "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:4173",
-  "http://127.0.0.1:4173"
+  "http://127.0.0.1:5173"
 ]);
 
 const isDev = process.env.NODE_ENV !== "production";
@@ -40,6 +36,10 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/", (req, res) => {
   res.status(200).send("Backend running");
+});
+
+app.get("/api/health", (req, res) => {
+  res.status(200).json({ ok: true });
 });
 
 app.use("/api/auth", authRoutes);
