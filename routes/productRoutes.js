@@ -75,7 +75,10 @@ router.post("/", auth, async (req, res) => {
       [product.id, qr_payload, current_state_hash]
     );
 
-    return res.status(201).json({ product, qr: { product_id: product.id, qr_payload, last_state_hash: current_state_hash } });
+    return res.status(201).json({
+      product,
+      qr: { product_id: product.id, qr_payload, last_state_hash: current_state_hash }
+    });
   } catch {
     return res.status(500).json({ message: "Server error" });
   }
@@ -89,7 +92,10 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
     const notes = req.body.notes ? String(req.body.notes).trim() : "Transferred/Updated";
     const extra = req.body.extra && typeof req.body.extra === "object" ? req.body.extra : {};
 
-    const p = await pool.query("SELECT id, product_code, current_state_hash FROM products WHERE product_code=$1", [productCode]);
+    const p = await pool.query(
+      "SELECT id, product_code, current_state_hash FROM products WHERE product_code=$1",
+      [productCode]
+    );
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
@@ -189,7 +195,6 @@ router.post("/scan", async (req, res) => {
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
-
     const isOriginal = product.current_state_hash === stateHash;
 
     const events = await pool.query(
