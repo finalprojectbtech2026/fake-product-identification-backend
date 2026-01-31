@@ -29,6 +29,11 @@ router.post("/signup", async (req, res) => {
     );
 
     const user = created.rows[0];
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "JWT secret missing" });
+    }
+
     const token = jwt.sign(
       { userId: user.id, role: user.role, email: user.email, wallet_address: user.wallet_address || null },
       process.env.JWT_SECRET,
@@ -36,11 +41,11 @@ router.post("/signup", async (req, res) => {
     );
 
     return res.status(201).json({ token, user });
-  } catch {
-    return res.status(500).json({ message: "Server error" });
+  } catch (err) {
+    console.error("SIGNUP_ERROR:", err);
+    return res.status(500).json({ message: "Server error", error: String(err?.message || err) });
   }
 });
-
 router.post("/login", async (req, res) => {
   try {
     const email = String(req.body.email || "").trim().toLowerCase();
