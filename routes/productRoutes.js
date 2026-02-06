@@ -1,3 +1,4 @@
+// D:\fpi\backend\routes\productRoutes.js
 const express = require("express");
 const crypto = require("crypto");
 const pool = require("../config/db");
@@ -35,6 +36,91 @@ const normalizeWallet = (w) => {
   if (!v) return "";
   return ethers.getAddress(v);
 };
+
+router.get("/", auth, async (req, res) => {
+  try {
+    if (req.user.role !== "regulator") return res.status(403).json({ message: "Only regulator can view products" });
+
+    const q = await pool.query(
+      `
+      SELECT
+        p.id,
+        p.product_code,
+        p.manufacturer_id,
+        p.name,
+        p.batch,
+        p.meta_json,
+        p.ipfs_cid,
+        p.current_state_hash,
+        p.cloud_hash,
+        p.nfc_uid_hash,
+        p.chain_register_tx_hash,
+        p.created_at,
+        a.audit_status,
+        a.audit_notes,
+        a.audit_at,
+        a.actor_email as audit_by_email
+      FROM products p
+      LEFT JOIN LATERAL (
+        SELECT
+          CASE
+            WHEN e.event_type = 'AUDIT_ACCEPT' THEN 'ACCEPT'
+            WHEN e.event_type = 'AUDIT_REJECT' THEN 'REJECT'
+            ELSE NULL
+          END AS audit_status,
+          e.notes AS audit_notes,
+          e.created_at AS audit_at,
+          u.email AS actor_email
+        FROM product_events e
+        JOIN users u ON u.id = e.actor_id
+        WHERE e.product_id = p.id
+          AND e.event_type IN ('AUDIT_ACCEPT','AUDIT_REJECT')
+        ORDER BY e.created_at DESC
+        LIMIT 1
+      ) a ON true
+      ORDER BY p.created_at DESC
+      `
+    );
+
+    return res.status(200).json({ products: q.rows });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error", error: String(e?.message || e) });
+  }
+});
+
+router.post("/:productCode/audit", auth, async (req, res) => {
+  try {
+    if (req.user.role !== "regulator") return res.status(403).json({ message: "Only regulator can audit products" });
+
+    const productCode = String(req.params.productCode || "").trim();
+    const decisionRaw = String(req.body.decision || "").trim().toUpperCase();
+    const notes = req.body.notes ? String(req.body.notes).trim() : null;
+
+    if (!productCode) return res.status(400).json({ message: "Missing productCode" });
+    if (!["ACCEPT", "REJECT"].includes(decisionRaw)) return res.status(400).json({ message: "decision must be ACCEPT or REJECT" });
+
+    const p = await pool.query("SELECT id, product_code, current_state_hash FROM products WHERE product_code=$1", [productCode]);
+    if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
+
+    const product = p.rows[0];
+    const et = decisionRaw === "ACCEPT" ? "AUDIT_ACCEPT" : "AUDIT_REJECT";
+    const msg = decisionRaw === "ACCEPT" ? "Accepted as original by regulator" : "Rejected as duplicate by regulator";
+
+    await pool.query(
+      `INSERT INTO product_events(product_id, event_type, actor_id, prev_state_hash, new_state_hash, chain_tx_hash, notes)
+       VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [product.id, et, req.user.userId, product.current_state_hash || null, product.current_state_hash || null, null, notes || msg]
+    );
+
+    return res.status(200).json({
+      product_code: product.product_code,
+      decision: decisionRaw,
+      notes: notes || msg
+    });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error", error: String(e?.message || e) });
+  }
+});
 
 router.post("/", auth, async (req, res) => {
   try {
