@@ -1,4 +1,3 @@
-// D:\fpi\backend\routes\productRoutes.js
 const express = require("express");
 const crypto = require("crypto");
 const pool = require("../config/db");
@@ -37,9 +36,24 @@ const normalizeWallet = (w) => {
   return ethers.getAddress(v);
 };
 
+const ensureAuditTable = async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS product_audits (
+      product_id BIGINT PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+      decision TEXT NOT NULL CHECK (decision IN ('ACCEPT','REJECT')),
+      notes TEXT,
+      regulator_id UUID REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+};
+
 router.get("/", auth, async (req, res) => {
   try {
     if (req.user.role !== "regulator") return res.status(403).json({ message: "Only regulator can view products" });
+
+    await ensureAuditTable();
 
     const q = await pool.query(
       `
@@ -56,28 +70,13 @@ router.get("/", auth, async (req, res) => {
         p.nfc_uid_hash,
         p.chain_register_tx_hash,
         p.created_at,
-        a.audit_status,
-        a.audit_notes,
-        a.audit_at,
-        a.actor_email as audit_by_email
+        a.decision AS audit_status,
+        a.notes AS audit_notes,
+        a.updated_at AS audit_at,
+        u.email AS audit_by_email
       FROM products p
-      LEFT JOIN LATERAL (
-        SELECT
-          CASE
-            WHEN e.event_type = 'AUDIT_ACCEPT' THEN 'ACCEPT'
-            WHEN e.event_type = 'AUDIT_REJECT' THEN 'REJECT'
-            ELSE NULL
-          END AS audit_status,
-          e.notes AS audit_notes,
-          e.created_at AS audit_at,
-          u.email AS actor_email
-        FROM product_events e
-        JOIN users u ON u.id = e.actor_id
-        WHERE e.product_id = p.id
-          AND e.event_type IN ('AUDIT_ACCEPT','AUDIT_REJECT')
-        ORDER BY e.created_at DESC
-        LIMIT 1
-      ) a ON true
+      LEFT JOIN product_audits a ON a.product_id = p.id
+      LEFT JOIN users u ON u.id = a.regulator_id
       ORDER BY p.created_at DESC
       `
     );
@@ -92,30 +91,34 @@ router.post("/:productCode/audit", auth, async (req, res) => {
   try {
     if (req.user.role !== "regulator") return res.status(403).json({ message: "Only regulator can audit products" });
 
+    await ensureAuditTable();
+
     const productCode = String(req.params.productCode || "").trim();
-    const decisionRaw = String(req.body.decision || "").trim().toUpperCase();
+    const decision = String(req.body.decision || "").trim().toUpperCase();
     const notes = req.body.notes ? String(req.body.notes).trim() : null;
 
     if (!productCode) return res.status(400).json({ message: "Missing productCode" });
-    if (!["ACCEPT", "REJECT"].includes(decisionRaw)) return res.status(400).json({ message: "decision must be ACCEPT or REJECT" });
+    if (!["ACCEPT", "REJECT"].includes(decision)) return res.status(400).json({ message: "decision must be ACCEPT or REJECT" });
 
-    const p = await pool.query("SELECT id, product_code, current_state_hash FROM products WHERE product_code=$1", [productCode]);
+    const p = await pool.query("SELECT id, product_code FROM products WHERE product_code=$1", [productCode]);
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
-    const et = decisionRaw === "ACCEPT" ? "AUDIT_ACCEPT" : "AUDIT_REJECT";
-    const msg = decisionRaw === "ACCEPT" ? "Accepted as original by regulator" : "Rejected as duplicate by regulator";
 
     await pool.query(
-      `INSERT INTO product_events(product_id, event_type, actor_id, prev_state_hash, new_state_hash, chain_tx_hash, notes)
-       VALUES($1,$2,$3,$4,$5,$6,$7)`,
-      [product.id, et, req.user.userId, product.current_state_hash || null, product.current_state_hash || null, null, notes || msg]
+      `
+      INSERT INTO product_audits(product_id, decision, notes, regulator_id)
+      VALUES($1,$2,$3,$4)
+      ON CONFLICT (product_id)
+      DO UPDATE SET decision=EXCLUDED.decision, notes=EXCLUDED.notes, regulator_id=EXCLUDED.regulator_id, updated_at=now()
+      `,
+      [product.id, decision, notes, req.user.userId]
     );
 
     return res.status(200).json({
       product_code: product.product_code,
-      decision: decisionRaw,
-      notes: notes || msg
+      decision,
+      notes: notes || (decision === "ACCEPT" ? "Accepted as original by regulator" : "Rejected as duplicate by regulator")
     });
   } catch (e) {
     return res.status(500).json({ message: "Server error", error: String(e?.message || e) });
@@ -311,6 +314,8 @@ router.post("/scan", async (req, res) => {
 
     if (!productId || !stateHash) return res.status(400).json({ message: "Missing productId/stateHash" });
 
+    await ensureAuditTable();
+
     const p = await pool.query(
       `SELECT id, product_code, name, batch, meta_json, ipfs_cid, current_state_hash, cloud_hash, nfc_uid_hash, created_at
        FROM products
@@ -344,7 +349,15 @@ router.post("/scan", async (req, res) => {
     const dbCloudHashMatches = (product.cloud_hash || "") === recomputedCloudHashHex;
     const chainCloudHashMatches = String(chainCloudHash).toLowerCase() === String(recomputedCloudHashBytes32).toLowerCase();
 
-    const isAuthentic = Boolean(chainExists && dbCloudHashMatches && chainCloudHashMatches);
+    const computedAuthentic = Boolean(chainExists && dbCloudHashMatches && chainCloudHashMatches);
+
+    const a = await pool.query(
+      `SELECT decision, notes, updated_at, regulator_id FROM product_audits WHERE product_id=$1`,
+      [product.id]
+    );
+    const audit = a.rowCount ? a.rows[0] : null;
+
+    const finalAuthentic = audit?.decision === "ACCEPT" ? true : audit?.decision === "REJECT" ? false : computedAuthentic;
 
     const events = await pool.query(
       `SELECT e.id, e.event_type, e.actor_id, e.prev_state_hash, e.new_state_hash, e.chain_tx_hash, e.notes, e.created_at,
@@ -376,12 +389,27 @@ router.post("/scan", async (req, res) => {
         cloudHash: chainCloudHash,
         nfcUidHash: chainNfcUidHash
       },
+      audit: audit
+        ? {
+            decision: audit.decision,
+            notes: audit.notes,
+            updated_at: audit.updated_at,
+            regulator_id: audit.regulator_id
+          }
+        : null,
       verdict: {
-        isAuthentic,
+        isAuthentic: finalAuthentic,
         isLatestDbState,
         dbCloudHashMatches,
         chainCloudHashMatches,
-        message: isAuthentic ? "Authentic (on-chain hash matches off-chain data)" : "Not authentic (hash mismatch or missing on-chain record)"
+        message:
+          audit?.decision === "ACCEPT"
+            ? "Accepted by regulator as original"
+            : audit?.decision === "REJECT"
+            ? "Rejected by regulator as duplicate"
+            : computedAuthentic
+            ? "Authentic (on-chain hash matches off-chain data)"
+            : "Not authentic (hash mismatch or missing on-chain record)"
       },
       events: events.rows
     });
