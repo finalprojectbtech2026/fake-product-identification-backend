@@ -39,14 +39,27 @@ const normalizeWallet = (w) => {
 const ensureAuditTable = async () => {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS product_audits (
-      product_id BIGINT PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
-      decision TEXT NOT NULL CHECK (decision IN ('ACCEPT','REJECT')),
-      notes TEXT,
-      regulator_id UUID REFERENCES users(id),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      product_id uuid PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+      decision text NOT NULL CHECK (decision IN ('ACCEPT','REJECT')),
+      notes text,
+      regulator_id uuid REFERENCES users(id),
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
     )
   `);
+};
+
+const resolveEventsTable = async () => {
+  const r = await pool.query(
+    `
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_schema='public' AND table_name IN ('product_events','products_events')
+    ORDER BY CASE WHEN table_name='product_events' THEN 1 ELSE 2 END
+    LIMIT 1
+    `
+  );
+  return r.rowCount ? r.rows[0].table_name : "product_events";
 };
 
 router.get("/", auth, async (req, res) => {
@@ -167,9 +180,10 @@ router.post("/", auth, async (req, res) => {
     );
 
     const product = created.rows[0];
+    const eventsTable = await resolveEventsTable();
 
     await pool.query(
-      `INSERT INTO product_events(product_id, event_type, actor_id, prev_state_hash, new_state_hash, chain_tx_hash, notes)
+      `INSERT INTO ${eventsTable}(product_id, event_type, actor_id, prev_state_hash, new_state_hash, chain_tx_hash, notes)
        VALUES($1,'REGISTER',$2,$3,$4,$5,$6)`,
       [product.id, req.user.userId, null, current_state_hash, receipt.hash, "Product registered on-chain"]
     );
@@ -222,8 +236,10 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
 
     await pool.query("UPDATE products SET current_state_hash=$1 WHERE id=$2", [new_hash, product.id]);
 
+    const eventsTable = await resolveEventsTable();
+
     await pool.query(
-      `INSERT INTO product_events(product_id, event_type, actor_id, prev_state_hash, new_state_hash, chain_tx_hash, notes)
+      `INSERT INTO ${eventsTable}(product_id, event_type, actor_id, prev_state_hash, new_state_hash, chain_tx_hash, notes)
        VALUES($1,'TRANSFER',$2,$3,$4,$5,$6)`,
       [product.id, req.user.userId, prev_hash, new_hash, receipt.hash, notes]
     );
@@ -264,11 +280,12 @@ router.get("/:productCode/history", async (req, res) => {
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
+    const eventsTable = await resolveEventsTable();
 
     const events = await pool.query(
       `SELECT e.id, e.event_type, e.actor_id, e.prev_state_hash, e.new_state_hash, e.chain_tx_hash, e.notes, e.created_at,
               u.role as actor_role, u.email as actor_email
-       FROM product_events e
+       FROM ${eventsTable} e
        JOIN users u ON u.id = e.actor_id
        WHERE e.product_id=$1
        ORDER BY e.created_at ASC`,
@@ -359,10 +376,12 @@ router.post("/scan", async (req, res) => {
 
     const finalAuthentic = audit?.decision === "ACCEPT" ? true : audit?.decision === "REJECT" ? false : computedAuthentic;
 
+    const eventsTable = await resolveEventsTable();
+
     const events = await pool.query(
       `SELECT e.id, e.event_type, e.actor_id, e.prev_state_hash, e.new_state_hash, e.chain_tx_hash, e.notes, e.created_at,
               u.role as actor_role, u.email as actor_email
-       FROM product_events e
+       FROM ${eventsTable} e
        JOIN users u ON u.id = e.actor_id
        WHERE e.product_id=$1
        ORDER BY e.created_at ASC`,
