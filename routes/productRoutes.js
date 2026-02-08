@@ -65,19 +65,9 @@ const resolveEventsTable = async () => {
 router.get("/", auth, async (req, res) => {
   try {
     const role = String(req.user?.role || "").toLowerCase();
-    if (role !== "regulator" && role !== "manufacturer") {
-      return res.status(403).json({ message: "Forbidden" });
-    }
+    if (role !== "regulator") return res.status(403).json({ message: "Only regulator can view products" });
 
     await ensureAuditTable();
-
-    let whereSql = "";
-    const params = [];
-
-    if (role === "manufacturer") {
-      params.push(req.user.userId);
-      whereSql = `WHERE p.manufacturer_id=$${params.length}`;
-    }
 
     const q = await pool.query(
       `
@@ -101,10 +91,49 @@ router.get("/", auth, async (req, res) => {
       FROM products p
       LEFT JOIN product_audits a ON a.product_id = p.id
       LEFT JOIN users u ON u.id = a.regulator_id
-      ${whereSql}
+      ORDER BY p.created_at DESC
+      `
+    );
+
+    return res.status(200).json({ products: q.rows });
+  } catch (e) {
+    return res.status(500).json({ message: "Server error", error: String(e?.message || e) });
+  }
+});
+
+router.get("/mine", auth, async (req, res) => {
+  try {
+    const role = String(req.user?.role || "").toLowerCase();
+    if (role !== "manufacturer") return res.status(403).json({ message: "Only manufacturer can view own products" });
+
+    await ensureAuditTable();
+
+    const q = await pool.query(
+      `
+      SELECT
+        p.id,
+        p.product_code,
+        p.manufacturer_id,
+        p.name,
+        p.batch,
+        p.meta_json,
+        p.ipfs_cid,
+        p.current_state_hash,
+        p.cloud_hash,
+        p.nfc_uid_hash,
+        p.chain_register_tx_hash,
+        p.created_at,
+        a.decision AS audit_status,
+        a.notes AS audit_notes,
+        a.updated_at AS audit_at,
+        u.email AS audit_by_email
+      FROM products p
+      LEFT JOIN product_audits a ON a.product_id = p.id
+      LEFT JOIN users u ON u.id = a.regulator_id
+      WHERE p.manufacturer_id=$1
       ORDER BY p.created_at DESC
       `,
-      params
+      [req.user.userId]
     );
 
     return res.status(200).json({ products: q.rows });
@@ -381,10 +410,7 @@ router.post("/scan", async (req, res) => {
 
     const computedAuthentic = Boolean(chainExists && dbCloudHashMatches && chainCloudHashMatches);
 
-    const a = await pool.query(
-      `SELECT decision, notes, updated_at, regulator_id FROM product_audits WHERE product_id=$1`,
-      [product.id]
-    );
+    const a = await pool.query(`SELECT decision, notes, updated_at, regulator_id FROM product_audits WHERE product_id=$1`, [product.id]);
     const audit = a.rowCount ? a.rows[0] : null;
 
     const finalAuthentic = audit?.decision === "ACCEPT" ? true : audit?.decision === "REJECT" ? false : computedAuthentic;
