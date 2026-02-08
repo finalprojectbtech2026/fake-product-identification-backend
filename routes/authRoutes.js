@@ -23,9 +23,11 @@ router.post("/signup", async (req, res) => {
 
     const password_hash = await bcrypt.hash(password, 10);
 
+    const approval_status = role === "manufacturer" ? "PENDING" : "APPROVED";
+
     const created = await pool.query(
-      "INSERT INTO users(role,email,password_hash) VALUES($1,$2,$3) RETURNING id, role, email, wallet_address, created_at",
-      [role, email, password_hash]
+      "INSERT INTO users(role,email,password_hash,approval_status) VALUES($1,$2,$3,$4) RETURNING id, role, email, wallet_address, approval_status, created_at",
+      [role, email, password_hash, approval_status]
     );
 
     const user = created.rows[0];
@@ -35,7 +37,13 @@ router.post("/signup", async (req, res) => {
     }
 
     const token = jwt.sign(
-      { userId: user.id, role: user.role, email: user.email, wallet_address: user.wallet_address || null },
+      {
+        userId: user.id,
+        role: user.role,
+        email: user.email,
+        wallet_address: user.wallet_address || null,
+        approval_status: user.approval_status
+      },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
@@ -46,6 +54,7 @@ router.post("/signup", async (req, res) => {
     return res.status(500).json({ message: "Server error", error: String(err?.message || err) });
   }
 });
+
 router.post("/login", async (req, res) => {
   try {
     const email = String(req.body.email || "").trim().toLowerCase();
@@ -53,35 +62,59 @@ router.post("/login", async (req, res) => {
 
     if (!email || !password) return res.status(400).json({ message: "Missing fields" });
 
-    const found = await pool.query("SELECT id, role, email, password_hash, wallet_address FROM users WHERE email=$1", [email]);
+    const found = await pool.query(
+      "SELECT id, role, email, password_hash, wallet_address, approval_status FROM users WHERE email=$1",
+      [email]
+    );
     if (found.rowCount === 0) return res.status(401).json({ message: "Invalid credentials" });
 
     const user = found.rows[0];
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
+    if (String(user.role || "").toLowerCase() === "manufacturer" && String(user.approval_status || "").toUpperCase() !== "APPROVED") {
+      return res.status(403).json({ message: "Manufacturer not approved yet", approval_status: user.approval_status });
+    }
+
     const token = jwt.sign(
-      { userId: user.id, role: user.role, email: user.email, wallet_address: user.wallet_address || null },
+      {
+        userId: user.id,
+        role: user.role,
+        email: user.email,
+        wallet_address: user.wallet_address || null,
+        approval_status: user.approval_status
+      },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
 
     return res.status(200).json({
       token,
-      user: { id: user.id, role: user.role, email: user.email, wallet_address: user.wallet_address || null }
+      user: {
+        id: user.id,
+        role: user.role,
+        email: user.email,
+        wallet_address: user.wallet_address || null,
+        approval_status: user.approval_status
+      }
     });
-  } catch {
-    return res.status(500).json({ message: "Server error" });
+  } catch (err) {
+    console.error("LOGIN_ERROR:", err);
+    return res.status(500).json({ message: "Server error", error: String(err?.message || err) });
   }
 });
 
 router.get("/me", auth, async (req, res) => {
   try {
-    const q = await pool.query("SELECT id, role, email, wallet_address, created_at FROM users WHERE id=$1", [req.user.userId]);
+    const q = await pool.query(
+      "SELECT id, role, email, wallet_address, approval_status, created_at FROM users WHERE id=$1",
+      [req.user.userId]
+    );
     if (q.rowCount === 0) return res.status(404).json({ message: "User not found" });
     return res.status(200).json({ user: q.rows[0] });
-  } catch {
-    return res.status(500).json({ message: "Server error" });
+  } catch (err) {
+    console.error("ME_ERROR:", err);
+    return res.status(500).json({ message: "Server error", error: String(err?.message || err) });
   }
 });
 
