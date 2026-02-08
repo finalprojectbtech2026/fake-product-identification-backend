@@ -64,9 +64,20 @@ const resolveEventsTable = async () => {
 
 router.get("/", auth, async (req, res) => {
   try {
-    if (req.user.role !== "regulator") return res.status(403).json({ message: "Only regulator can view products" });
+    const role = String(req.user?.role || "").toLowerCase();
+    if (role !== "regulator" && role !== "manufacturer") {
+      return res.status(403).json({ message: "Forbidden" });
+    }
 
     await ensureAuditTable();
+
+    let whereSql = "";
+    const params = [];
+
+    if (role === "manufacturer") {
+      params.push(req.user.userId);
+      whereSql = `WHERE p.manufacturer_id=$${params.length}`;
+    }
 
     const q = await pool.query(
       `
@@ -90,8 +101,10 @@ router.get("/", auth, async (req, res) => {
       FROM products p
       LEFT JOIN product_audits a ON a.product_id = p.id
       LEFT JOIN users u ON u.id = a.regulator_id
+      ${whereSql}
       ORDER BY p.created_at DESC
-      `
+      `,
+      params
     );
 
     return res.status(200).json({ products: q.rows });
