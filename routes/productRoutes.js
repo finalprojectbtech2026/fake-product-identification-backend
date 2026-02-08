@@ -33,7 +33,11 @@ const makeQrPayload = ({ product_code, state_hash }) => {
 const normalizeWallet = (w) => {
   const v = String(w || "").trim();
   if (!v) return "";
-  return ethers.getAddress(v);
+  try {
+    return ethers.getAddress(v);
+  } catch {
+    return "";
+  }
 };
 
 const ensureAuditTable = async () => {
@@ -62,40 +66,98 @@ const resolveEventsTable = async () => {
   return r.rowCount ? r.rows[0].table_name : "product_events";
 };
 
+const getSellerWalletAndStatus = async (userId) => {
+  const q = await pool.query("SELECT wallet_address, approval_status FROM users WHERE id=$1", [userId]);
+  if (q.rowCount === 0) return { wallet: "", approval: "" };
+  const wallet = q.rows[0].wallet_address ? normalizeWallet(q.rows[0].wallet_address) : "";
+  const approval = String(q.rows[0].approval_status || "").toUpperCase();
+  return { wallet, approval };
+};
+
+const listSellerProducts = async (sellerWallet) => {
+  const q = await pool.query(
+    `
+    SELECT id, product_code, current_state_hash, created_at
+    FROM products
+    ORDER BY created_at DESC
+    LIMIT 500
+    `
+  );
+
+  const rows = q.rows || [];
+  const out = [];
+
+  for (const p of rows) {
+    try {
+      const onchain = await contract.getProduct(p.product_code);
+      const exists = Boolean(onchain[0]);
+      if (!exists) continue;
+
+      const owner = normalizeWallet(onchain[2]);
+      if (!owner) continue;
+
+      if (owner.toLowerCase() !== sellerWallet.toLowerCase()) continue;
+
+      out.push({
+        product_code: p.product_code,
+        status: "OWNED",
+        owner_wallet: owner,
+        latest_state_hash: p.current_state_hash || ""
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return out;
+};
+
 router.get("/", auth, async (req, res) => {
   try {
     const role = String(req.user?.role || "").toLowerCase();
-    if (role !== "regulator") return res.status(403).json({ message: "Only regulator can view products" });
 
-    await ensureAuditTable();
+    if (role === "regulator") {
+      await ensureAuditTable();
 
-    const q = await pool.query(
-      `
-      SELECT
-        p.id,
-        p.product_code,
-        p.manufacturer_id,
-        p.name,
-        p.batch,
-        p.meta_json,
-        p.ipfs_cid,
-        p.current_state_hash,
-        p.cloud_hash,
-        p.nfc_uid_hash,
-        p.chain_register_tx_hash,
-        p.created_at,
-        a.decision AS audit_status,
-        a.notes AS audit_notes,
-        a.updated_at AS audit_at,
-        u.email AS audit_by_email
-      FROM products p
-      LEFT JOIN product_audits a ON a.product_id = p.id
-      LEFT JOIN users u ON u.id = a.regulator_id
-      ORDER BY p.created_at DESC
-      `
-    );
+      const q = await pool.query(
+        `
+        SELECT
+          p.id,
+          p.product_code,
+          p.manufacturer_id,
+          p.name,
+          p.batch,
+          p.meta_json,
+          p.ipfs_cid,
+          p.current_state_hash,
+          p.cloud_hash,
+          p.nfc_uid_hash,
+          p.chain_register_tx_hash,
+          p.created_at,
+          a.decision AS audit_status,
+          a.notes AS audit_notes,
+          a.updated_at AS audit_at,
+          u.email AS audit_by_email
+        FROM products p
+        LEFT JOIN product_audits a ON a.product_id = p.id
+        LEFT JOIN users u ON u.id = a.regulator_id
+        ORDER BY p.created_at DESC
+        `
+      );
 
-    return res.status(200).json({ products: q.rows });
+      return res.status(200).json({ products: q.rows });
+    }
+
+    if (role === "seller") {
+      const { wallet, approval } = await getSellerWalletAndStatus(req.user.userId);
+      if (approval !== "APPROVED") return res.status(403).json({ message: "Seller not approved yet", approval_status: approval });
+      if (!wallet) return res.status(400).json({ message: "Seller wallet not linked" });
+
+      const products = await listSellerProducts(wallet);
+      return res.status(200).json({ products });
+    }
+
+    return res.status(403).json({ message: "Not allowed" });
   } catch (e) {
     return res.status(500).json({ message: "Server error", error: String(e?.message || e) });
   }
@@ -104,39 +166,51 @@ router.get("/", auth, async (req, res) => {
 router.get("/mine", auth, async (req, res) => {
   try {
     const role = String(req.user?.role || "").toLowerCase();
-    if (role !== "manufacturer") return res.status(403).json({ message: "Only manufacturer can view own products" });
 
-    await ensureAuditTable();
+    if (role === "manufacturer") {
+      await ensureAuditTable();
 
-    const q = await pool.query(
-      `
-      SELECT
-        p.id,
-        p.product_code,
-        p.manufacturer_id,
-        p.name,
-        p.batch,
-        p.meta_json,
-        p.ipfs_cid,
-        p.current_state_hash,
-        p.cloud_hash,
-        p.nfc_uid_hash,
-        p.chain_register_tx_hash,
-        p.created_at,
-        a.decision AS audit_status,
-        a.notes AS audit_notes,
-        a.updated_at AS audit_at,
-        u.email AS audit_by_email
-      FROM products p
-      LEFT JOIN product_audits a ON a.product_id = p.id
-      LEFT JOIN users u ON u.id = a.regulator_id
-      WHERE p.manufacturer_id=$1
-      ORDER BY p.created_at DESC
-      `,
-      [req.user.userId]
-    );
+      const q = await pool.query(
+        `
+        SELECT
+          p.id,
+          p.product_code,
+          p.manufacturer_id,
+          p.name,
+          p.batch,
+          p.meta_json,
+          p.ipfs_cid,
+          p.current_state_hash,
+          p.cloud_hash,
+          p.nfc_uid_hash,
+          p.chain_register_tx_hash,
+          p.created_at,
+          a.decision AS audit_status,
+          a.notes AS audit_notes,
+          a.updated_at AS audit_at,
+          u.email AS audit_by_email
+        FROM products p
+        LEFT JOIN product_audits a ON a.product_id = p.id
+        LEFT JOIN users u ON u.id = a.regulator_id
+        WHERE p.manufacturer_id=$1
+        ORDER BY p.created_at DESC
+        `,
+        [req.user.userId]
+      );
 
-    return res.status(200).json({ products: q.rows });
+      return res.status(200).json({ products: q.rows });
+    }
+
+    if (role === "seller") {
+      const { wallet, approval } = await getSellerWalletAndStatus(req.user.userId);
+      if (approval !== "APPROVED") return res.status(403).json({ message: "Seller not approved yet", approval_status: approval });
+      if (!wallet) return res.status(400).json({ message: "Seller wallet not linked" });
+
+      const products = await listSellerProducts(wallet);
+      return res.status(200).json({ products });
+    }
+
+    return res.status(403).json({ message: "Only manufacturer or seller can view own products" });
   } catch (e) {
     return res.status(500).json({ message: "Server error", error: String(e?.message || e) });
   }
@@ -250,20 +324,40 @@ router.post("/", auth, async (req, res) => {
 
 router.post("/:productCode/transfer", auth, async (req, res) => {
   try {
-    if (req.user.role !== "seller") return res.status(403).json({ message: "Only seller can transfer/update" });
+    if (String(req.user?.role || "").toLowerCase() !== "seller") {
+      return res.status(403).json({ message: "Only seller can transfer/update" });
+    }
+
+    const { wallet: sellerWallet, approval } = await getSellerWalletAndStatus(req.user.userId);
+    if (approval !== "APPROVED") return res.status(403).json({ message: "Seller not approved yet", approval_status: approval });
+    if (!sellerWallet) return res.status(400).json({ message: "Link your wallet first" });
 
     const productCode = String(req.params.productCode || "").trim();
     const notes = req.body.notes ? String(req.body.notes).trim() : "Transferred/Updated";
     const extra = req.body.extra && typeof req.body.extra === "object" ? req.body.extra : {};
     const toWallet = normalizeWallet(req.body.to_wallet);
 
-    if (!toWallet) return res.status(400).json({ message: "Missing to_wallet" });
+    if (!toWallet) return res.status(400).json({ message: "Invalid to_wallet" });
 
     const p = await pool.query("SELECT id, product_code, current_state_hash FROM products WHERE product_code=$1", [productCode]);
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
     const prev_hash = product.current_state_hash;
+
+    let chainOwner = "";
+    try {
+      const onchain = await contract.getProduct(product.product_code);
+      const exists = Boolean(onchain[0]);
+      if (!exists) return res.status(404).json({ message: "On-chain product not found" });
+      chainOwner = normalizeWallet(onchain[2]);
+    } catch {
+      return res.status(500).json({ message: "Unable to read on-chain product" });
+    }
+
+    if (!chainOwner || chainOwner.toLowerCase() !== sellerWallet.toLowerCase()) {
+      return res.status(403).json({ message: "You are not the current on-chain owner of this product" });
+    }
 
     const tx = await contract.transferProduct(product.product_code, toWallet);
     const receipt = await tx.wait();
@@ -273,7 +367,7 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
       action: "TRANSFER",
       actor_id: req.user.userId,
       prev_hash,
-      extra: { ...extra, to_wallet: toWallet, chain_transfer_tx_hash: receipt.hash }
+      extra: { ...extra, from_wallet: sellerWallet, to_wallet: toWallet, chain_transfer_tx_hash: receipt.hash }
     });
 
     await pool.query("UPDATE products SET current_state_hash=$1 WHERE id=$2", [new_hash, product.id]);
@@ -324,7 +418,7 @@ router.get("/:productCode/history", async (req, res) => {
     const product = p.rows[0];
     const eventsTable = await resolveEventsTable();
 
-    const events = await pool.query(
+    const eventsQ = await pool.query(
       `SELECT e.id, e.event_type, e.actor_id, e.prev_state_hash, e.new_state_hash, e.chain_tx_hash, e.notes, e.created_at,
               u.role as actor_role, u.email as actor_email
        FROM ${eventsTable} e
@@ -333,6 +427,21 @@ router.get("/:productCode/history", async (req, res) => {
        ORDER BY e.created_at ASC`,
       [product.id]
     );
+
+    const events = (eventsQ.rows || []).map((ev) => ({
+      id: ev.id,
+      timestamp: ev.created_at,
+      action: ev.event_type,
+      from_wallet: "",
+      to_wallet: "",
+      state_hash: ev.new_state_hash || "",
+      prev_state_hash: ev.prev_state_hash || "",
+      new_state_hash: ev.new_state_hash || "",
+      chain_tx_hash: ev.chain_tx_hash || "",
+      notes: ev.notes || "",
+      actor_role: ev.actor_role || "",
+      actor_email: ev.actor_email || ""
+    }));
 
     const qr = await pool.query(
       `SELECT qr_payload, last_state_hash, updated_at
@@ -358,7 +467,7 @@ router.get("/:productCode/history", async (req, res) => {
     return res.status(200).json({
       product,
       qr: qr.rowCount ? qr.rows[0] : null,
-      events: events.rows,
+      events,
       chain
     });
   } catch (e) {

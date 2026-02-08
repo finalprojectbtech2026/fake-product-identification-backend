@@ -8,13 +8,27 @@ const router = express.Router();
 const normalizeWallet = (w) => {
   const v = String(w || "").trim();
   if (!v) return "";
-  return ethers.getAddress(v);
+  try {
+    return ethers.getAddress(v);
+  } catch {
+    return "";
+  }
 };
 
 router.post("/link-wallet", auth, async (req, res) => {
   try {
+    if (String(req.user?.role || "").toLowerCase() !== "seller") {
+      return res.status(403).json({ message: "Only seller can link wallet" });
+    }
+
     const wallet = normalizeWallet(req.body.wallet_address);
-    if (!wallet) return res.status(400).json({ message: "Missing wallet_address" });
+    if (!wallet) return res.status(400).json({ message: "Invalid wallet_address" });
+
+    const u = await pool.query("SELECT approval_status FROM users WHERE id=$1", [req.user.userId]);
+    if (u.rowCount === 0) return res.status(404).json({ message: "User not found" });
+
+    const st = String(u.rows[0].approval_status || "").toUpperCase();
+    if (st !== "APPROVED") return res.status(403).json({ message: "Seller not approved yet", approval_status: st });
 
     await pool.query("UPDATE users SET wallet_address=$1 WHERE id=$2", [wallet, req.user.userId]);
 
@@ -29,7 +43,7 @@ router.post("/verify", auth, async (req, res) => {
     if (req.user.role !== "manufacturer") return res.status(403).json({ message: "Only manufacturer can verify sellers" });
 
     const wallet = normalizeWallet(req.body.wallet_address);
-    if (!wallet) return res.status(400).json({ message: "Missing wallet_address" });
+    if (!wallet) return res.status(400).json({ message: "Invalid wallet_address" });
 
     const tx = await contract.verifySeller(wallet);
     const receipt = await tx.wait();
@@ -45,7 +59,7 @@ router.post("/revoke", auth, async (req, res) => {
     if (req.user.role !== "manufacturer") return res.status(403).json({ message: "Only manufacturer can revoke sellers" });
 
     const wallet = normalizeWallet(req.body.wallet_address);
-    if (!wallet) return res.status(400).json({ message: "Missing wallet_address" });
+    if (!wallet) return res.status(400).json({ message: "Invalid wallet_address" });
 
     const tx = await contract.revokeSeller(wallet);
     const receipt = await tx.wait();
