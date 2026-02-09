@@ -1,3 +1,4 @@
+// D:\fpi\backend\routes\authRoutes.js
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -7,6 +8,11 @@ const auth = require("../middleware/auth");
 const router = express.Router();
 
 const allowedRoles = new Set(["manufacturer", "seller", "customer", "regulator"]);
+
+const needsApproval = (role) => {
+  const r = String(role || "").trim().toLowerCase();
+  return r === "manufacturer" || r === "seller";
+};
 
 router.post("/signup", async (req, res) => {
   try {
@@ -22,8 +28,7 @@ router.post("/signup", async (req, res) => {
     if (exists.rowCount > 0) return res.status(409).json({ message: "Email already exists" });
 
     const password_hash = await bcrypt.hash(password, 10);
-
-    const approval_status = role === "manufacturer" ? "PENDING" : "APPROVED";
+    const approval_status = needsApproval(role) ? "PENDING" : "APPROVED";
 
     const created = await pool.query(
       "INSERT INTO users(role,email,password_hash,approval_status) VALUES($1,$2,$3,$4) RETURNING id, role, email, wallet_address, approval_status, created_at",
@@ -72,8 +77,18 @@ router.post("/login", async (req, res) => {
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
-    if (String(user.role || "").toLowerCase() === "manufacturer" && String(user.approval_status || "").toUpperCase() !== "APPROVED") {
-      return res.status(403).json({ message: "Manufacturer not approved yet", approval_status: user.approval_status });
+    const role = String(user.role || "").toLowerCase();
+    const st = String(user.approval_status || "").toUpperCase();
+
+    if (needsApproval(role) && st !== "APPROVED") {
+      return res.status(403).json({
+        message: `${role === "seller" ? "Seller" : "Manufacturer"} not approved yet`,
+        approval_status: user.approval_status
+      });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "JWT secret missing" });
     }
 
     const token = jwt.sign(
