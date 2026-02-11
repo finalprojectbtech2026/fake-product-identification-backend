@@ -66,7 +66,7 @@ const resolveEventsTable = async () => {
   return r.rowCount ? r.rows[0].table_name : "product_events";
 };
 
-const getSellerWalletAndStatus = async (userId) => {
+const getUserWalletAndStatus = async (userId) => {
   const q = await pool.query("SELECT wallet_address, approval_status FROM users WHERE id=$1", [userId]);
   if (q.rowCount === 0) return { wallet: "", approval: "" };
   const wallet = q.rows[0].wallet_address ? normalizeWallet(q.rows[0].wallet_address) : "";
@@ -149,7 +149,7 @@ router.get("/", auth, async (req, res) => {
     }
 
     if (role === "seller") {
-      const { wallet, approval } = await getSellerWalletAndStatus(req.user.userId);
+      const { wallet, approval } = await getUserWalletAndStatus(req.user.userId);
       if (approval !== "APPROVED") return res.status(403).json({ message: "Seller not approved yet", approval_status: approval });
       if (!wallet) return res.status(400).json({ message: "Seller wallet not linked" });
 
@@ -202,7 +202,7 @@ router.get("/mine", auth, async (req, res) => {
     }
 
     if (role === "seller") {
-      const { wallet, approval } = await getSellerWalletAndStatus(req.user.userId);
+      const { wallet, approval } = await getUserWalletAndStatus(req.user.userId);
       if (approval !== "APPROVED") return res.status(403).json({ message: "Seller not approved yet", approval_status: approval });
       if (!wallet) return res.status(400).json({ message: "Seller wallet not linked" });
 
@@ -324,13 +324,12 @@ router.post("/", auth, async (req, res) => {
 
 router.post("/:productCode/transfer", auth, async (req, res) => {
   try {
-    if (String(req.user?.role || "").toLowerCase() !== "seller") {
-      return res.status(403).json({ message: "Only seller can transfer/update" });
+    if (String(req.user?.role || "").toLowerCase() !== "manufacturer") {
+      return res.status(403).json({ message: "Only manufacturer can transfer/update" });
     }
 
-    const { wallet: sellerWallet, approval } = await getSellerWalletAndStatus(req.user.userId);
-    if (approval !== "APPROVED") return res.status(403).json({ message: "Seller not approved yet", approval_status: approval });
-    if (!sellerWallet) return res.status(400).json({ message: "Link your wallet first" });
+    const { wallet: manufacturerWallet, approval } = await getUserWalletAndStatus(req.user.userId);
+    if (approval !== "APPROVED") return res.status(403).json({ message: "Manufacturer not approved yet", approval_status: approval });
 
     const productCode = String(req.params.productCode || "").trim();
     const notes = req.body.notes ? String(req.body.notes).trim() : "Transferred/Updated";
@@ -339,25 +338,16 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
 
     if (!toWallet) return res.status(400).json({ message: "Invalid to_wallet" });
 
-    const p = await pool.query("SELECT id, product_code, current_state_hash FROM products WHERE product_code=$1", [productCode]);
+    const p = await pool.query("SELECT id, product_code, current_state_hash, manufacturer_id FROM products WHERE product_code=$1", [productCode]);
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
+
+    if (String(product.manufacturer_id) !== String(req.user.userId)) {
+      return res.status(403).json({ message: "You are not the manufacturer of this product" });
+    }
+
     const prev_hash = product.current_state_hash;
-
-    let chainOwner = "";
-    try {
-      const onchain = await contract.getProduct(product.product_code);
-      const exists = Boolean(onchain[0]);
-      if (!exists) return res.status(404).json({ message: "On-chain product not found" });
-      chainOwner = normalizeWallet(onchain[2]);
-    } catch {
-      return res.status(500).json({ message: "Unable to read on-chain product" });
-    }
-
-    if (!chainOwner || chainOwner.toLowerCase() !== sellerWallet.toLowerCase()) {
-      return res.status(403).json({ message: "You are not the current on-chain owner of this product" });
-    }
 
     const tx = await contract.transferProduct(product.product_code, toWallet);
     const receipt = await tx.wait();
@@ -367,7 +357,7 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
       action: "TRANSFER",
       actor_id: req.user.userId,
       prev_hash,
-      extra: { ...extra, from_wallet: sellerWallet, to_wallet: toWallet, chain_transfer_tx_hash: receipt.hash }
+      extra: { ...extra, from_wallet: manufacturerWallet || "", to_wallet: toWallet, chain_transfer_tx_hash: receipt.hash }
     });
 
     await pool.query("UPDATE products SET current_state_hash=$1 WHERE id=$2", [new_hash, product.id]);
