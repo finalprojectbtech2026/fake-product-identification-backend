@@ -1,4 +1,3 @@
-// D:\fpi\backend\routes\authRoutes.js
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -9,24 +8,23 @@ const router = express.Router();
 
 const allowedRoles = new Set(["manufacturer", "seller", "customer", "regulator"]);
 
+const norm = (v) => String(v || "").trim();
+const normLower = (v) => norm(v).toLowerCase();
+
 const needsApproval = (role) => {
-  const r = String(role || "").trim().toLowerCase();
+  const r = normLower(role);
   return r === "manufacturer" || r === "seller";
 };
 
-const norm = (v) => String(v ?? "").trim();
-
-const validateEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim().toLowerCase());
-
-const isRoleNeedsDetails = (role) => {
-  const r = String(role || "").trim().toLowerCase();
-  return r === "manufacturer" || r === "seller" || r === "regulator";
+const needsExtraDetails = (role) => {
+  const r = normLower(role);
+  return r === "manufacturer" || r === "seller";
 };
 
 router.post("/signup", async (req, res) => {
   try {
-    const role = norm(req.body.role).toLowerCase();
-    const email = norm(req.body.email).toLowerCase();
+    const role = normLower(req.body.role);
+    const email = normLower(req.body.email);
     const password = String(req.body.password || "");
 
     const name = norm(req.body.name);
@@ -35,10 +33,10 @@ router.post("/signup", async (req, res) => {
     const license_number = norm(req.body.license_number);
 
     if (!allowedRoles.has(role)) return res.status(400).json({ message: "Invalid role" });
-    if (!validateEmail(email)) return res.status(400).json({ message: "Invalid email" });
+    if (!email || !email.includes("@")) return res.status(400).json({ message: "Invalid email" });
     if (!password || password.length < 4) return res.status(400).json({ message: "Password too short" });
 
-    if (isRoleNeedsDetails(role)) {
+    if (needsExtraDetails(role)) {
       if (!name) return res.status(400).json({ message: "Name is required" });
       if (!company_name) return res.status(400).json({ message: "Company name is required" });
       if (!address) return res.status(400).json({ message: "Address is required" });
@@ -48,21 +46,25 @@ router.post("/signup", async (req, res) => {
     const exists = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
     if (exists.rowCount > 0) return res.status(409).json({ message: "Email already exists" });
 
-    if (isRoleNeedsDetails(role)) {
-      const dup = await pool.query("SELECT id FROM users WHERE role=$1 AND license_number=$2", [role, license_number]);
-      if (dup.rowCount > 0) return res.status(409).json({ message: "Licence number already exists for this role" });
-    }
-
     const password_hash = await bcrypt.hash(password, 10);
     const approval_status = needsApproval(role) ? "PENDING" : "APPROVED";
 
     const created = await pool.query(
       `
-      INSERT INTO users(role,email,password_hash,approval_status,name,company_name,address,license_number)
+      INSERT INTO users(role, name, company_name, email, address, license_number, password_hash, approval_status)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-      RETURNING id, role, email, wallet_address, approval_status, created_at, name, company_name, address, license_number
+      RETURNING id, role, name, company_name, email, address, license_number, wallet_address, approval_status, created_at
       `,
-      [role, email, password_hash, approval_status, name || "", company_name || "", address || "", license_number || ""]
+      [
+        role,
+        needsExtraDetails(role) ? name : null,
+        needsExtraDetails(role) ? company_name : null,
+        email,
+        needsExtraDetails(role) ? address : null,
+        needsExtraDetails(role) ? license_number : null,
+        password_hash,
+        approval_status
+      ]
     );
 
     const user = created.rows[0];
@@ -92,13 +94,13 @@ router.post("/signup", async (req, res) => {
 
 router.post("/login", async (req, res) => {
   try {
-    const email = norm(req.body.email).toLowerCase();
+    const email = normLower(req.body.email);
     const password = String(req.body.password || "");
 
     if (!email || !password) return res.status(400).json({ message: "Missing fields" });
 
     const found = await pool.query(
-      "SELECT id, role, email, password_hash, wallet_address, approval_status, name, company_name, address, license_number FROM users WHERE email=$1",
+      "SELECT id, role, name, company_name, email, address, license_number, password_hash, wallet_address, approval_status FROM users WHERE email=$1",
       [email]
     );
     if (found.rowCount === 0) return res.status(401).json({ message: "Invalid credentials" });
@@ -107,8 +109,8 @@ router.post("/login", async (req, res) => {
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
-    const role = String(user.role || "").toLowerCase();
-    const st = String(user.approval_status || "").toUpperCase();
+    const role = normLower(user.role);
+    const st = String(user.approval_status || "").toUpperCase().trim();
 
     if (needsApproval(role) && st !== "APPROVED") {
       return res.status(403).json({
@@ -138,13 +140,13 @@ router.post("/login", async (req, res) => {
       user: {
         id: user.id,
         role: user.role,
+        name: user.name || null,
+        company_name: user.company_name || null,
         email: user.email,
+        address: user.address || null,
+        license_number: user.license_number || null,
         wallet_address: user.wallet_address || null,
-        approval_status: user.approval_status,
-        name: user.name || "",
-        company_name: user.company_name || "",
-        address: user.address || "",
-        license_number: user.license_number || ""
+        approval_status: user.approval_status
       }
     });
   } catch (err) {
@@ -156,7 +158,7 @@ router.post("/login", async (req, res) => {
 router.get("/me", auth, async (req, res) => {
   try {
     const q = await pool.query(
-      "SELECT id, role, email, wallet_address, approval_status, created_at, name, company_name, address, license_number FROM users WHERE id=$1",
+      "SELECT id, role, name, company_name, email, address, license_number, wallet_address, approval_status, created_at FROM users WHERE id=$1",
       [req.user.userId]
     );
     if (q.rowCount === 0) return res.status(404).json({ message: "User not found" });
