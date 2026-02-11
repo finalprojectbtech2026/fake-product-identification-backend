@@ -37,7 +37,8 @@ router.get("/", auth, async (req, res) => {
     const q = await pool.query(
       `
       SELECT id, role, email, wallet_address, approval_status, approval_notes,
-             approved_by, approved_at, rejected_by, rejected_at, created_at
+             approved_by, approved_at, rejected_by, rejected_at, created_at,
+             name, company_name, address, license_number
       FROM users
       WHERE ${where.join(" AND ")}
       ORDER BY created_at DESC
@@ -64,7 +65,8 @@ router.get("/:id", auth, async (req, res) => {
     const q = await pool.query(
       `
       SELECT id, role, email, wallet_address, approval_status, approval_notes,
-             approved_by, approved_at, rejected_by, rejected_at, created_at
+             approved_by, approved_at, rejected_by, rejected_at, created_at,
+             name, company_name, address, license_number
       FROM users
       WHERE id=$1 AND role=$2
       `,
@@ -99,7 +101,8 @@ router.post("/:id/approve", auth, async (req, res) => {
           rejected_at=NULL
       WHERE id=$1 AND role=$4
       RETURNING id, role, email, wallet_address, approval_status, approval_notes,
-                approved_by, approved_at, rejected_by, rejected_at, created_at
+                approved_by, approved_at, rejected_by, rejected_at, created_at,
+                name, company_name, address, license_number
       `,
       [id, notes, req.user.userId, role]
     );
@@ -132,7 +135,8 @@ router.post("/:id/reject", auth, async (req, res) => {
           approved_at=NULL
       WHERE id=$1 AND role=$4
       RETURNING id, role, email, wallet_address, approval_status, approval_notes,
-                approved_by, approved_at, rejected_by, rejected_at, created_at
+                approved_by, approved_at, rejected_by, rejected_at, created_at,
+                name, company_name, address, license_number
       `,
       [id, notes, req.user.userId, role]
     );

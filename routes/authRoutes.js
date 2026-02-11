@@ -14,25 +14,55 @@ const needsApproval = (role) => {
   return r === "manufacturer" || r === "seller";
 };
 
+const norm = (v) => String(v ?? "").trim();
+
+const validateEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim().toLowerCase());
+
+const isRoleNeedsDetails = (role) => {
+  const r = String(role || "").trim().toLowerCase();
+  return r === "manufacturer" || r === "seller" || r === "regulator";
+};
+
 router.post("/signup", async (req, res) => {
   try {
-    const role = String(req.body.role || "").trim().toLowerCase();
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const role = norm(req.body.role).toLowerCase();
+    const email = norm(req.body.email).toLowerCase();
     const password = String(req.body.password || "");
 
+    const name = norm(req.body.name);
+    const company_name = norm(req.body.company_name);
+    const address = norm(req.body.address);
+    const license_number = norm(req.body.license_number);
+
     if (!allowedRoles.has(role)) return res.status(400).json({ message: "Invalid role" });
-    if (!email || !email.includes("@")) return res.status(400).json({ message: "Invalid email" });
+    if (!validateEmail(email)) return res.status(400).json({ message: "Invalid email" });
     if (!password || password.length < 4) return res.status(400).json({ message: "Password too short" });
+
+    if (isRoleNeedsDetails(role)) {
+      if (!name) return res.status(400).json({ message: "Name is required" });
+      if (!company_name) return res.status(400).json({ message: "Company name is required" });
+      if (!address) return res.status(400).json({ message: "Address is required" });
+      if (!license_number) return res.status(400).json({ message: "Licence number is required" });
+    }
 
     const exists = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
     if (exists.rowCount > 0) return res.status(409).json({ message: "Email already exists" });
+
+    if (isRoleNeedsDetails(role)) {
+      const dup = await pool.query("SELECT id FROM users WHERE role=$1 AND license_number=$2", [role, license_number]);
+      if (dup.rowCount > 0) return res.status(409).json({ message: "Licence number already exists for this role" });
+    }
 
     const password_hash = await bcrypt.hash(password, 10);
     const approval_status = needsApproval(role) ? "PENDING" : "APPROVED";
 
     const created = await pool.query(
-      "INSERT INTO users(role,email,password_hash,approval_status) VALUES($1,$2,$3,$4) RETURNING id, role, email, wallet_address, approval_status, created_at",
-      [role, email, password_hash, approval_status]
+      `
+      INSERT INTO users(role,email,password_hash,approval_status,name,company_name,address,license_number)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+      RETURNING id, role, email, wallet_address, approval_status, created_at, name, company_name, address, license_number
+      `,
+      [role, email, password_hash, approval_status, name || "", company_name || "", address || "", license_number || ""]
     );
 
     const user = created.rows[0];
@@ -62,13 +92,13 @@ router.post("/signup", async (req, res) => {
 
 router.post("/login", async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = norm(req.body.email).toLowerCase();
     const password = String(req.body.password || "");
 
     if (!email || !password) return res.status(400).json({ message: "Missing fields" });
 
     const found = await pool.query(
-      "SELECT id, role, email, password_hash, wallet_address, approval_status FROM users WHERE email=$1",
+      "SELECT id, role, email, password_hash, wallet_address, approval_status, name, company_name, address, license_number FROM users WHERE email=$1",
       [email]
     );
     if (found.rowCount === 0) return res.status(401).json({ message: "Invalid credentials" });
@@ -110,7 +140,11 @@ router.post("/login", async (req, res) => {
         role: user.role,
         email: user.email,
         wallet_address: user.wallet_address || null,
-        approval_status: user.approval_status
+        approval_status: user.approval_status,
+        name: user.name || "",
+        company_name: user.company_name || "",
+        address: user.address || "",
+        license_number: user.license_number || ""
       }
     });
   } catch (err) {
@@ -122,7 +156,7 @@ router.post("/login", async (req, res) => {
 router.get("/me", auth, async (req, res) => {
   try {
     const q = await pool.query(
-      "SELECT id, role, email, wallet_address, approval_status, created_at FROM users WHERE id=$1",
+      "SELECT id, role, email, wallet_address, approval_status, created_at, name, company_name, address, license_number FROM users WHERE id=$1",
       [req.user.userId]
     );
     if (q.rowCount === 0) return res.status(404).json({ message: "User not found" });
