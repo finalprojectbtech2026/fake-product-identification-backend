@@ -328,26 +328,63 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
       return res.status(403).json({ message: "Only manufacturer can transfer/update" });
     }
 
-    const { wallet: manufacturerWallet, approval } = await getUserWalletAndStatus(req.user.userId);
+    const { approval } = await getUserWalletAndStatus(req.user.userId);
     if (approval !== "APPROVED") return res.status(403).json({ message: "Manufacturer not approved yet", approval_status: approval });
 
     const productCode = String(req.params.productCode || "").trim();
     const notes = req.body.notes ? String(req.body.notes).trim() : "Transferred/Updated";
     const extra = req.body.extra && typeof req.body.extra === "object" ? req.body.extra : {};
+    const stage = String(extra.stage || "").trim().toLowerCase();
     const toWallet = normalizeWallet(req.body.to_wallet);
-
-    if (!toWallet) return res.status(400).json({ message: "Invalid to_wallet" });
 
     const p = await pool.query("SELECT id, product_code, current_state_hash, manufacturer_id FROM products WHERE product_code=$1", [productCode]);
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
-
     if (String(product.manufacturer_id) !== String(req.user.userId)) {
       return res.status(403).json({ message: "You are not the manufacturer of this product" });
     }
 
     const prev_hash = product.current_state_hash;
+
+    if (stage === "manufacturer_update") {
+      const new_hash = makeStateHash({
+        product_code: product.product_code,
+        action: "MANUFACTURER_UPDATE",
+        actor_id: req.user.userId,
+        prev_hash,
+        extra: { ...extra }
+      });
+
+      await pool.query("UPDATE products SET current_state_hash=$1 WHERE id=$2", [new_hash, product.id]);
+
+      const eventsTable = await resolveEventsTable();
+
+      await pool.query(
+        `INSERT INTO ${eventsTable}(product_id, event_type, actor_id, prev_state_hash, new_state_hash, chain_tx_hash, notes)
+         VALUES($1,'MANUFACTURER_UPDATE',$2,$3,$4,$5,$6)`,
+        [product.id, req.user.userId, prev_hash, new_hash, null, notes]
+      );
+
+      const qr_payload = makeQrPayload({ product_code: product.product_code, state_hash: new_hash });
+
+      await pool.query(
+        `INSERT INTO qr_codes(product_id, qr_payload, last_state_hash)
+         VALUES($1,$2,$3)
+         ON CONFLICT (product_id)
+         DO UPDATE SET qr_payload=EXCLUDED.qr_payload, last_state_hash=EXCLUDED.last_state_hash, updated_at=now()`,
+        [product.id, qr_payload, new_hash]
+      );
+
+      return res.status(200).json({
+        product_code: product.product_code,
+        prev_state_hash: prev_hash,
+        new_state_hash: new_hash,
+        qr_payload
+      });
+    }
+
+    if (!toWallet) return res.status(400).json({ message: "Invalid to_wallet" });
 
     const tx = await contract.transferProduct(product.product_code, toWallet);
     const receipt = await tx.wait();
@@ -357,7 +394,7 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
       action: "TRANSFER",
       actor_id: req.user.userId,
       prev_hash,
-      extra: { ...extra, from_wallet: manufacturerWallet || "", to_wallet: toWallet, chain_transfer_tx_hash: receipt.hash }
+      extra: { ...extra, to_wallet: toWallet, chain_transfer_tx_hash: receipt.hash }
     });
 
     await pool.query("UPDATE products SET current_state_hash=$1 WHERE id=$2", [new_hash, product.id]);
@@ -392,6 +429,7 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
     return res.status(500).json({ message: "Server error", error: String(e?.message || e) });
   }
 });
+
 
 router.get("/:productCode/history", async (req, res) => {
   try {
