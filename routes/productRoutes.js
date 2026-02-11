@@ -347,7 +347,7 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
 
     const prev_hash = product.current_state_hash;
 
-    if (stage === "manufacturer_update") {
+    if (!toWallet && stage === "manufacturer_update") {
       const new_hash = makeStateHash({
         product_code: product.product_code,
         action: "MANUFACTURER_UPDATE",
@@ -429,7 +429,6 @@ router.post("/:productCode/transfer", auth, async (req, res) => {
     return res.status(500).json({ message: "Server error", error: String(e?.message || e) });
   }
 });
-
 
 router.get("/:productCode/history", async (req, res) => {
   try {
