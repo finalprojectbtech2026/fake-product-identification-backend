@@ -16,6 +16,34 @@ const normalizeWallet = (w) => {
   }
 };
 
+router.post("/manufacturer/link-wallet", auth, async (req, res) => {
+  try {
+    if (String(req.user?.role || "").toLowerCase() !== "manufacturer") {
+      return res.status(403).json({ message: "Only manufacturer can link wallet" });
+    }
+
+    const wallet = normalizeWallet(req.body.wallet_address);
+    if (!wallet) return res.status(400).json({ message: "Invalid wallet_address" });
+
+    const u = await pool.query("SELECT approval_status FROM users WHERE id=$1", [req.user.userId]);
+    if (u.rowCount === 0) return res.status(404).json({ message: "User not found" });
+
+    const st = String(u.rows[0].approval_status || "").toUpperCase();
+    if (st !== "APPROVED") return res.status(403).json({ message: "Manufacturer not approved yet", approval_status: st });
+
+    await pool.query("UPDATE users SET wallet_address=$1 WHERE id=$2", [wallet, req.user.userId]);
+
+    return res.status(200).json({ wallet_address: wallet });
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (msg.toLowerCase().includes("duplicate") || msg.toLowerCase().includes("unique")) {
+      return res.status(409).json({ message: "Wallet already linked to another account" });
+    }
+    return res.status(500).json({ message: "Server error", error: msg });
+  }
+});
+
+
 router.post("/link-wallet", auth, async (req, res) => {
   try {
     if (String(req.user?.role || "").toLowerCase() !== "seller") {
