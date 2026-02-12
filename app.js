@@ -6,6 +6,7 @@ const productRoutes = require("./routes/productRoutes");
 const storageRoutes = require("./routes/storageRoutes");
 const sellerRoutes = require("./routes/sellerRoutes");
 const manufacturerRoutes = require("./routes/manufacturerRoutes");
+const orderRoutes = require("./routes/orderRoutes");
 
 const app = express();
 
@@ -50,5 +51,6 @@ app.use("/api/products", productRoutes);
 app.use("/api/storage", storageRoutes);
 app.use("/api/sellers", sellerRoutes);
 app.use("/api/manufacturers", manufacturerRoutes);
+app.use("/api/orders", orderRoutes);
 
 module.exports = app;

@@ -77,7 +77,7 @@ const getUserWalletAndStatus = async (userId) => {
 const listSellerProducts = async (sellerWallet) => {
   const q = await pool.query(
     `
-    SELECT id, product_code, current_state_hash, created_at
+    SELECT id, product_code, current_state_hash, sale_status, created_at
     FROM products
     ORDER BY created_at DESC
     LIMIT 500
@@ -98,9 +98,11 @@ const listSellerProducts = async (sellerWallet) => {
 
       if (owner.toLowerCase() !== sellerWallet.toLowerCase()) continue;
 
+      const sale = String(p.sale_status || "AVAILABLE").toUpperCase();
+
       out.push({
         product_code: p.product_code,
-        status: "OWNED",
+        status: sale === "SOLD" ? "SOLD" : "OWNED",
         owner_wallet: owner,
         latest_state_hash: p.current_state_hash || ""
       });
