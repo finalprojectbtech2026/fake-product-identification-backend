@@ -442,6 +442,7 @@ router.get("/:productCode/history", async (req, res) => {
        WHERE product_code=$1`,
       [productCode]
     );
+
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
@@ -519,6 +520,7 @@ router.post("/scan", async (req, res) => {
        WHERE product_code=$1`,
       [productId]
     );
+
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];

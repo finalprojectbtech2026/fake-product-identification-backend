@@ -1,4 +1,3 @@
-// D:\fpi\backend\routes\orderRoutes.js
 const express = require("express");
 const pool = require("../config/db");
 
@@ -16,7 +15,7 @@ router.post("/", async (req, res) => {
     const customer_email = normalize(req.body.customer_email);
     const customer_address = normalize(req.body.customer_address);
 
-    const payment_method = normalize(req.body.payment_method).toUpperCase(); // COD, MOCK_UPI, MOCK_CARD
+    const payment_method = normalize(req.body.payment_method).toUpperCase();
 
     if (!productCode || !stateHash) return res.status(400).json({ message: "Missing product_code/state_hash" });
     if (!customer_name || !customer_phone || !customer_address) return res.status(400).json({ message: "Missing customer details" });
@@ -28,6 +27,7 @@ router.post("/", async (req, res) => {
        WHERE product_code=$1`,
       [productCode]
     );
+
     if (p.rowCount === 0) return res.status(404).json({ message: "Product not found" });
 
     const product = p.rows[0];
@@ -41,9 +41,6 @@ router.post("/", async (req, res) => {
       return res.status(409).json({ message: "Old QR detected. Please scan latest QR." });
     }
 
-    // Dummy payment simulation:
-    // COD => CONFIRMED, payment PENDING
-    // MOCK_* => treat as PAID always (for demo)
     const payment_status = payment_method === "COD" ? "PENDING" : "PAID";
     const order_status = "CONFIRMED";
 
