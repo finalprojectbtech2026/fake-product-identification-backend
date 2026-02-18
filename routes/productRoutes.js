@@ -515,7 +515,7 @@ router.post("/scan", async (req, res) => {
     await ensureAuditTable();
 
     const p = await pool.query(
-      `SELECT id, product_code, name, batch, meta_json, ipfs_cid, current_state_hash, cloud_hash, nfc_uid_hash, created_at
+      `SELECT id, product_code, name, batch, meta_json, ipfs_cid, current_state_hash, cloud_hash, nfc_uid_hash, sale_status, created_at
        FROM products
        WHERE product_code=$1`,
       [productId]
@@ -525,6 +525,9 @@ router.post("/scan", async (req, res) => {
 
     const product = p.rows[0];
     const isLatestDbState = product.current_state_hash === stateHash;
+
+    const saleStatus = String(product.sale_status || "AVAILABLE").toUpperCase();
+    const isSold = saleStatus === "SOLD";
 
     const cloudPayload = canonicalJson({
       product_code: product.product_code,
@@ -554,6 +557,7 @@ router.post("/scan", async (req, res) => {
     const audit = a.rowCount ? a.rows[0] : null;
 
     const finalAuthentic = audit?.decision === "ACCEPT" ? true : audit?.decision === "REJECT" ? false : computedAuthentic;
+    const canPurchase = Boolean(finalAuthentic && isLatestDbState && !isSold);
 
     const eventsTable = await resolveEventsTable();
 
@@ -567,6 +571,18 @@ router.post("/scan", async (req, res) => {
       [product.id]
     );
 
+    const baseMessage =
+      audit?.decision === "ACCEPT"
+        ? "Accepted by regulator as original"
+        : audit?.decision === "REJECT"
+        ? "Rejected by regulator as duplicate"
+        : computedAuthentic
+        ? "Authentic (on-chain hash matches off-chain data)"
+        : "Not authentic (hash mismatch or missing on-chain record)";
+
+    const soldSuffix = isSold ? " Product already sold." : "";
+    const latestSuffix = isLatestDbState ? "" : " Old QR detected.";
+
     return res.status(200).json({
       product: {
         product_code: product.product_code,
@@ -577,6 +593,7 @@ router.post("/scan", async (req, res) => {
         current_state_hash: product.current_state_hash,
         cloud_hash: product.cloud_hash,
         nfc_uid_hash: product.nfc_uid_hash,
+        sale_status: saleStatus,
         created_at: product.created_at
       },
       scanned: { productId, stateHash },
@@ -600,14 +617,9 @@ router.post("/scan", async (req, res) => {
         isLatestDbState,
         dbCloudHashMatches,
         chainCloudHashMatches,
-        message:
-          audit?.decision === "ACCEPT"
-            ? "Accepted by regulator as original"
-            : audit?.decision === "REJECT"
-            ? "Rejected by regulator as duplicate"
-            : computedAuthentic
-            ? "Authentic (on-chain hash matches off-chain data)"
-            : "Not authentic (hash mismatch or missing on-chain record)"
+        isSold,
+        canPurchase,
+        message: `${baseMessage}${latestSuffix}${soldSuffix}`.trim()
       },
       events: events.rows
     });
